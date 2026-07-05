@@ -1478,6 +1478,68 @@ function schedExit(v){
   goto(v);
 }
 
+/* ── 課表時間提醒（跳出通知） ── */
+function schedNotifyOn(){ try{ return localStorage.getItem('schedNotify') === '1'; }catch(e){ return false; } }
+async function schedNotifyToggle(){
+  const on = !schedNotifyOn();
+  if (on && 'Notification' in window && Notification.permission === 'default'){
+    try{ await Notification.requestPermission(); }catch(e){}
+  }
+  try{ localStorage.setItem('schedNotify', on ? '1' : '0'); }catch(e){}
+  spk(on ? '已開啟運動時間提醒' : '已關閉提醒');
+  if (view === 'exSched') render();
+}
+function schedFired(){
+  const today = new Date().toISOString().slice(0,10);
+  try{
+    const o = JSON.parse(localStorage.getItem('schedFired')||'{}');
+    return o.date === today ? o : {date: today, idx: []};
+  }catch(e){ return {date: today, idx: []}; }
+}
+function schedMarkFired(i){
+  const o = schedFired();
+  if (!o.idx.includes(i)) o.idx.push(i);
+  try{ localStorage.setItem('schedFired', JSON.stringify(o)); }catch(e){}
+}
+function schedCheckReminders(){
+  if (!schedNotifyOn() || !unlocked) return;
+  const d = new Date();
+  const tab = (d.getDay()===0 || d.getDay()===6) ? 'we' : 'wd';
+  const nowMin = d.getHours()*60 + d.getMinutes();
+  const fired = schedFired();
+  getSched(tab).forEach((it,i)=>{
+    if (!/^\d/.test(it.t)) return;
+    if (nowMin >= it.s && nowMin < it.s + 2 && !fired.idx.includes(i)){
+      schedMarkFired(i);
+      fireSchedReminder(it);
+    }
+  });
+}
+function fireSchedReminder(it){
+  const plain = it.tx.replace(/<[^>]*>/g, ' ');
+  spk('提醒您，時間到了。' + plain);
+  if (navigator.vibrate) navigator.vibrate([300,120,300]);
+  if ('Notification' in window && Notification.permission === 'granted'){
+    try{ new Notification('⏰ Foot Lift 提醒', { body: it.t + (it.t2?'～'+it.t2:'') + '　' + plain }); }catch(e){}
+  }
+  const old = document.getElementById('schedAlarm'); if (old) old.remove();
+  const div = document.createElement('div');
+  div.id = 'schedAlarm';
+  div.innerHTML = `
+  <div style="position:fixed;inset:0;z-index:9999;background:rgba(15,110,86,.6);backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px);display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:32px;" onclick="if(event.target===this)schedAlarmClose()">
+    <div style="font-size:64px;animation:pulse 1s infinite;">⏰</div>
+    <div style="font-size:24px;font-weight:800;color:#fff;margin:14px 0 6px;text-shadow:0 2px 8px rgba(0,0,0,.3);">運動時間到了！</div>
+    <div style="font-size:15px;color:#e6fff5;line-height:1.8;margin-bottom:26px;">${it.t}${it.t2?'～'+it.t2:''}<br>${it.tx}</div>
+    ${it.go ? `<button onclick="schedAlarmClose();${it.go[0]}()" style="background:#fff;color:var(--td);border:none;border-radius:50px;padding:14px 36px;font-size:16px;font-weight:800;margin-bottom:12px;box-shadow:0 4px 20px rgba(0,0,0,.25);">${it.go[1]}</button>` : ''}
+    <button onclick="schedAlarmClose();schedFrom='home';goto('exSched')" style="background:rgba(255,255,255,.2);color:#fff;border:1.5px solid rgba(255,255,255,.6);border-radius:50px;padding:12px 32px;font-size:14px;font-weight:700;margin-bottom:12px;">查看週課表</button>
+    <button onclick="schedAlarmClose()" style="background:transparent;color:#d8f5ea;border:none;font-size:14px;font-weight:600;padding:8px 20px;">知道了 ✓</button>
+  </div>`;
+  document.body.appendChild(div);
+}
+function schedAlarmClose(){ const el = document.getElementById('schedAlarm'); if (el) el.remove(); }
+setInterval(schedCheckReminders, 30000);
+setTimeout(schedCheckReminders, 3000);
+
 function scheduleHTML(){
   const d = new Date();
   const isWE = d.getDay() === 0 || d.getDay() === 6;
@@ -1526,6 +1588,7 @@ function scheduleHTML(){
       <button class="back" onclick="schedExit(schedFrom)"><i class="ti ti-arrow-left"></i></button>
       <h1>週課表</h1>
       ${schedEdit ? `<button class="action" style="font-size:12px;" onclick="schedResetTimes()">恢復預設</button>` : ''}
+      <button class="action sched-edit-btn ${schedNotifyOn()?'on':''}" onclick="schedNotifyToggle()" title="時間到跳出提醒"><i class="ti ${schedNotifyOn()?'ti-bell-ringing':'ti-bell-off'}"></i></button>
       <button class="action sched-edit-btn ${schedEdit?'on':''}" onclick="schedEdit=!schedEdit;render()"><i class="ti ${schedEdit?'ti-check':'ti-pencil'}"></i></button>
     </div>
     ${schedEdit ? `<p style="font-size:12px;color:var(--td);background:var(--tl);border-radius:10px;padding:8px 12px;margin-bottom:1rem;">✏️ 編輯模式：直接點時間即可修改，改完按右上「✓」完成。</p>` : ''}
