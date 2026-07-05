@@ -1801,6 +1801,7 @@ async function aiHTML(){
           <button class="btn" onclick="runTrendSummary()">📈 產生趨勢整理</button>
           <button class="btn secondary" onclick="runVisitBrief()">📋 產生回診摘要</button>
           <button class="btn secondary" onclick="runGaitCoaching()">🦶 步態與姿勢衛教建議</button>
+          <button class="btn secondary" onclick="runReportPicker()">🔬 檢查報告解析</button>
         </div>
         <div id="aiOutput"></div>
       `}
@@ -1899,6 +1900,112 @@ async function runGaitCoaching(){
     out.innerHTML = `<p class="ai-response">${escapeHtml(text)}</p>`;
   }catch(e){
     out.innerHTML = `<p class="ai-response" style="color:var(--red);">產生失敗：${escapeHtml(e.message||String(e))}</p>`;
+  }
+}
+
+/* ── 檢查報告解析（單次／多次綜合，AI 視覺分析） ── */
+async function callAIVision(prompt, files){
+  // files: [{mime, b64}]
+  const ai = getActiveAI();
+  if (!ai) throw new Error('請先到「設定」輸入 API Key');
+  if (ai === 'gemini'){
+    const key = settings.geminiKey;
+    const ordered = settings.geminiWorkingModel
+      ? [settings.geminiWorkingModel, ...GEMINI_MODEL_CANDIDATES.filter(m=>m!==settings.geminiWorkingModel)]
+      : GEMINI_MODEL_CANDIDATES;
+    const parts = [{text: prompt}, ...files.map(f => ({inline_data:{mime_type:f.mime, data:f.b64}}))];
+    let lastErr = null;
+    for (const model of ordered){
+      const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`,{
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ contents:[{parts}] })
+      });
+      const data = await resp.json().catch(()=>({}));
+      if (resp.ok){
+        if (settings.geminiWorkingModel !== model) saveSetting('geminiWorkingModel', model);
+        return data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+      }
+      const msg = data.error?.message || resp.statusText;
+      lastErr = new Error(msg);
+      const isModelIssue = resp.status === 404 || /not found|not supported|does not exist/i.test(msg);
+      if (!isModelIssue) throw lastErr;
+    }
+    throw lastErr || new Error('所有 Gemini 模型版本皆嘗試失敗');
+  } else {
+    if (files.some(f => f.mime === 'application/pdf')) throw new Error('OpenAI 引擎不支援 PDF 解析，請改用 Gemini，或上傳報告照片（圖片）');
+    const content = [{type:'text', text:prompt}, ...files.map(f => ({type:'image_url', image_url:{url:'data:'+f.mime+';base64,'+f.b64}}))];
+    const resp = await fetch('https://api.openai.com/v1/chat/completions',{
+      method:'POST', headers:{'Content-Type':'application/json','Authorization':`Bearer ${settings.openaiKey}`},
+      body: JSON.stringify({ model: OPENAI_MODEL, messages:[{role:'user',content}], max_tokens:1200, temperature:0.3 })
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error?.message || resp.statusText);
+    return data.choices?.[0]?.message?.content || '';
+  }
+}
+async function runReportPicker(){
+  const out = document.getElementById('aiOutput');
+  out.innerHTML = '<p class="ai-thinking">載入報告清單…</p>';
+  const attachments = await dbGetAll('attachments');
+  const timeline = await dbGetAll('timeline');
+  const tlById = {}; timeline.forEach(t => tlById[t.id] = t);
+  const rows = attachments.map(a => ({...a, tl: tlById[a.timelineId]}))
+    .filter(a => a.tl && a.dataUrl && a.dataUrl.startsWith('data:'))
+    .sort((a,b) => b.tl.date.localeCompare(a.tl.date));
+  if (!rows.length){
+    out.innerHTML = '<p class="ai-response">目前沒有可解析的報告。請先到「檢查報告」頁上傳報告照片或 PDF。</p>';
+    return;
+  }
+  out.innerHTML = `
+    <div style="background:#fff;border-radius:12px;padding:12px;">
+      <div style="font-size:13px;font-weight:700;margin-bottom:8px;">選擇要解析的報告（勾 1 份＝單次解析；勾多份＝跨次綜合比較）</div>
+      ${rows.map(a => {
+        const t = TL_TYPES[a.tl.type] || TL_TYPES.visit;
+        return `<label style="display:flex;align-items:center;gap:8px;padding:7px 2px;border-bottom:1px solid var(--border);font-size:13px;cursor:pointer;">
+          <input type="checkbox" class="rp-check" value="${a.id}" style="accent-color:var(--teal);width:17px;height:17px;">
+          <span class="hist-date">${a.tl.date}</span>
+          <span style="color:var(--td);font-size:11px;">${t.label}</span>
+          <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(a.name)}</span>
+        </label>`;
+      }).join('')}
+      <div class="modal-btns">
+        <button class="btn secondary" onclick="document.querySelectorAll('.rp-check').forEach(c=>c.checked=true)">全選</button>
+        <button class="btn" onclick="analyzeReports()">🔬 開始解析</button>
+      </div>
+      <p style="font-size:11px;color:var(--text3);margin-top:8px;">一次最多 8 份；PDF 解析僅支援 Gemini 引擎。</p>
+    </div>
+    <div id="rpResult"></div>`;
+}
+async function analyzeReports(){
+  const ids = Array.from(document.querySelectorAll('.rp-check:checked')).map(c => c.value);
+  const res = document.getElementById('rpResult');
+  if (!ids.length){ res.innerHTML = '<p class="ai-response" style="color:var(--red);">請先勾選至少一份報告</p>'; return; }
+  if (ids.length > 8){ res.innerHTML = '<p class="ai-response" style="color:var(--red);">一次最多解析 8 份，請減少勾選</p>'; return; }
+  res.innerHTML = '<p class="ai-thinking">AI 正在解讀報告，請稍候（檔案較大時需 1-2 分鐘）…</p>';
+  try{
+    const attachments = await dbGetAll('attachments');
+    const timeline = await dbGetAll('timeline');
+    const tlById = {}; timeline.forEach(t => tlById[t.id] = t);
+    const picked = attachments.filter(a => ids.includes(a.id));
+    const files = [], meta = [];
+    let total = 0;
+    for (const a of picked){
+      const m = a.dataUrl.match(/^data:([^;]+);base64,(.*)$/s);
+      if (!m) continue;
+      total += m[2].length;
+      files.push({mime: m[1], b64: m[2]});
+      const tl = tlById[a.timelineId] || {};
+      meta.push(`${tl.date||'?'}（${(TL_TYPES[tl.type]||{}).label||''}）${a.name}${tl.title?'：'+tl.title:''}`);
+    }
+    if (total > 18000000) throw new Error('選取的檔案總量過大，請分批解析');
+    const single = files.length === 1;
+    const prompt = `${AI_SAFETY_INSTRUCTION}\n\n以下${single?'是一份':'依時間順序是多份'}使用者上傳的檢查報告${single?'':'（共 '+files.length+' 份）'}，對應資訊：\n${meta.map((s,i)=>(i+1)+'. '+s).join('\n')}\n\n${single
+      ? '請解讀這份報告：1) 報告類型、日期與檢查項目 2) 報告中的主要數值或發現（如可辨識） 3) 報告上醫師寫下的結論（盡量原文引用） 4) 用白話說明這些內容的一般意義（衛教性質，不做新診斷） 5) 建議回診時與醫師確認的問題。'
+      : '請綜合分析這些不同時間的報告：1) 逐份列出日期與重點發現 2) 跨次比較：哪些項目改善、持平或變化（僅根據報告內容） 3) 整體趨勢的白話整理（衛教性質，不做新診斷） 4) 建議與醫師討論的重點問題清單。'}\n若影像不清楚或無法辨識，請直接說明哪些部分無法判讀，不要猜測。繁體中文。`;
+    const text = await callAIVision(prompt, files);
+    res.innerHTML = `<div style="background:#fff;border-radius:12px;padding:12px;margin-top:10px;"><div style="font-size:12px;font-weight:700;color:var(--td);margin-bottom:6px;">🔬 ${single?'單次報告解析':'多次報告綜合分析（'+files.length+' 份）'}</div><p class="ai-response">${escapeHtml(text)}</p></div>`;
+  }catch(e){
+    res.innerHTML = `<p class="ai-response" style="color:var(--red);">解析失敗：${escapeHtml(e.message||String(e))}</p>`;
   }
 }
 
