@@ -213,6 +213,94 @@ footer-note{display:block;text-align:center;font-size:11px;color:var(--text3);ma
 const DB_NAME = 'recoveryTrackerDB';
 const DB_VERSION = 2;
 const STORES = ['timeline','attachments','symptomLogs','gaitLogs','exerciseLogs','kv','caseNotes'];
+
+/* ══════════════════════════════════════════════
+   復健系統：外部 App 連結 ＋ 模組總覽（用於整合分析）
+   本 App（Foot Lift）內建 4 個模組；其餘模組在姊妹 App 中完成，
+   在此手動記錄一筆，才能一起被下面的「復健系統分析」統計到。
+══════════════════════════════════════════════ */
+const EXTERNAL_APPS = [
+  { url:'https://cyysongyy.github.io/5-steps-rehab-for-footdrop/', icon:'ti-stretching', color:'#3d7a4f', bg:'#e8f3ea',
+    title:'復健暖身訓練（完整版）', sub:'站姿腰椎・臥姿腰椎・擴胸運動・彈力帶訓練 等完整模組' },
+  { url:'https://cyysongyy.github.io/gait/', icon:'ti-walk', color:'#764ba2', bg:'#eef0fd',
+    title:'步態平衡訓練器', sub:'陀螺儀即時平衡測量・5 個平衡訓練動作' },
+  { url:'https://cyysongyy.github.io/rehab/', icon:'ti-walk', color:'#3d5a8a', bg:'#dce6f4',
+    title:'復健走路 App', sub:'計時・計步・Walk Beat BPM' },
+];
+const MODULE_META = {
+  warm:        { label:'足部暖身',     cat:'垂足復健' },
+  rehab:       { label:'垂足背屈復健', cat:'垂足復健' },
+  glute:       { label:'臀部啟動訓練', cat:'垂足復健' },
+  lift:        { label:'腳掌抬起',     cat:'垂足復健' },
+  lumbar_stand:{ label:'站姿腰椎復健', cat:'腰椎保養' },
+  lumbar_bed:  { label:'臥姿腰椎復健', cat:'腰椎保養' },
+  chest:       { label:'擴胸運動',     cat:'胸背訓練' },
+  band:        { label:'彈力帶訓練',   cat:'胸背訓練' },
+  gait_balance:{ label:'步態平衡訓練', cat:'步態訓練' },
+};
+const EXTERNAL_QUICK_LOG = ['lumbar_stand','lumbar_bed','chest','band','gait_balance'];
+function externalAppsHTML(){
+  return `<div style="margin-top:6px;">
+    <div style="font-size:13px;font-weight:600;color:var(--text2);margin:12px 2px 8px;">🧰 更多復健工具（其他 App）</div>
+    ${EXTERNAL_APPS.map(a => `
+    <a href="${a.url}" target="_blank" rel="noopener"
+      style="display:flex;align-items:center;gap:14px;padding:16px;background:var(--card);
+      border-radius:14px;border:1.5px solid ${a.color}55;text-decoration:none;color:var(--text);margin-bottom:10px;">
+      <div style="width:40px;height:40px;border-radius:10px;background:${a.bg};color:${a.color};
+        display:flex;align-items:center;justify-content:center;flex-shrink:0;"><i class="ti ${a.icon}" style="font-size:20px;"></i></div>
+      <div style="flex:1;min-width:0;">
+        <div style="font-weight:600;font-size:14px;">${a.title}</div>
+        <div style="font-size:11px;color:var(--text3);margin-top:2px;">${a.sub}</div>
+      </div>
+      <i class="ti ti-external-link" style="font-size:15px;color:${a.color};flex-shrink:0;"></i>
+    </a>`).join('')}
+    <p style="font-size:11px;color:var(--text3);line-height:1.7;margin:2px 2px 4px;">
+      💡 在其他 App 做完訓練後，回來這裡點下方「快速記錄」，才會一起計入下方的復健系統分析。
+    </p>
+    <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:4px;">
+      ${EXTERNAL_QUICK_LOG.map(k => `<button class="btn secondary" style="flex:none;padding:8px 12px;font-size:12px;" onclick="logExternalModule('${k}')">✓ ${MODULE_META[k].label}</button>`).join('')}
+    </div>
+  </div>`;
+}
+async function logExternalModule(key){
+  const meta = MODULE_META[key] || { label:key };
+  await dbPut('exerciseLogs', { id: uid(), date: new Date().toISOString().slice(0,10), module:key, label: meta.label, source:'external' });
+  render();
+}
+async function computeRehabAnalysis(){
+  const exLogs = await dbGetAll('exerciseLogs');
+  const symptomLogs = (await dbGetAll('symptomLogs')).sort((a,b)=>a.date.localeCompare(b.date));
+  const today = new Date();
+  const startThis = new Date(today); startThis.setDate(today.getDate()-6);
+  const startLast = new Date(today); startLast.setDate(today.getDate()-13);
+  const thisWeekLogs = exLogs.filter(l => new Date(l.date) >= startThis);
+  const lastWeekLogs = exLogs.filter(l => { const d = new Date(l.date); return d >= startLast && d < startThis; });
+  const thisWeekByCat = {};
+  for (const l of thisWeekLogs){
+    const cat = (MODULE_META[l.module]||{cat:'其他'}).cat;
+    thisWeekByCat[cat] = (thisWeekByCat[cat]||0) + 1;
+  }
+  let symptomTrendText = '症狀日誌筆數尚不足以看出趨勢';
+  let symptomImproving = null;
+  if (symptomLogs.length >= 4){
+    const recent = symptomLogs.slice(-3);
+    const prior = symptomLogs.slice(-6,-3);
+    if (prior.length){
+      const avg = arr => arr.reduce((s,l)=>s+(l.dorsiStrength||0),0)/arr.length;
+      const rA = avg(recent), pA = avg(prior);
+      const diff = rA - pA;
+      symptomImproving = diff > 0.2 ? true : (diff < -0.2 ? false : null);
+      symptomTrendText = `背屈肌力自評近期平均 ${rA.toFixed(1)}／5（前期 ${pA.toFixed(1)}／5）`;
+    }
+  }
+  return {
+    thisWeekCount: thisWeekLogs.length,
+    lastWeekCount: lastWeekLogs.length,
+    thisWeekByCat,
+    symptomTrendText,
+    symptomImproving,
+  };
+}
 let _db = null;
 function openDB(){
   return new Promise((resolve, reject) => {
@@ -538,6 +626,22 @@ async function computeAlerts(){
   }
   return alerts;
 }
+function rehabAnalysisCardHTML(a){
+  const catText = Object.entries(a.thisWeekByCat).map(([c,n]) => `${c} ${n}次`).join('・') || '本週尚無記錄';
+  const deltaIcon = a.thisWeekCount > a.lastWeekCount ? '📈' : (a.thisWeekCount < a.lastWeekCount ? '📉' : '➡️');
+  const trendColor = a.symptomImproving === true ? 'var(--teal)' : (a.symptomImproving === false ? 'var(--red)' : 'var(--text2)');
+  return `
+    <div class="card">
+      <div class="card-title"><i class="ti ti-chart-dots-3"></i>復健系統分析</div>
+      <p style="font-size:13px;color:var(--text2);">${deltaIcon} 本週共完成 <strong style="color:var(--td)">${a.thisWeekCount}</strong> 次運動（上週 ${a.lastWeekCount} 次）</p>
+      <p style="font-size:12px;color:var(--text3);margin-top:4px;">依類別：${catText}</p>
+      <p style="font-size:12px;color:${trendColor};margin-top:6px;">${a.symptomTrendText}</p>
+      <p style="font-size:11px;color:var(--text3);margin-top:8px;line-height:1.6;">
+        統計涵蓋本 App 內建運動，加上您在「運動」分頁手動記錄的其他 App 訓練（腰椎／擴胸／彈力帶／步態平衡），
+        可在「AI 摘要」取得完整趨勢說明。
+      </p>
+    </div>`;
+}
 async function homeHTML(){
   const timeline = (await dbGetAll('timeline')).sort((a,b)=>a.date.localeCompare(b.date));
   const nerveSurgery = timeline.find(t => t.title.includes('神經重建'));
@@ -547,6 +651,7 @@ async function homeHTML(){
   const exLogs = await dbGetAll('exerciseLogs');
   const today = new Date().toISOString().slice(0,10);
   const doneToday = exLogs.filter(l => l.date === today).length;
+  const analysis = await computeRehabAnalysis();
 
   return `
     <div style="text-align:center;margin:0.5rem 0 1.2rem;position:relative;">
@@ -568,6 +673,7 @@ async function homeHTML(){
       <p style="font-size:13px;color:var(--text2);">今天已完成 <strong style="color:var(--td)">${doneToday}</strong> 項運動</p>
       <button class="btn" style="margin-top:10px;width:100%;" onclick="goto('exercise')">前往運動 →</button>
     </div>
+    ${rehabAnalysisCardHTML(analysis)}
     <div class="nav-grid">
       <button class="nav-card" onclick="goto('timeline')"><i class="ti ti-timeline"></i><div class="t">病歷時間軸</div><div class="s">手術／回診／EMG</div></button>
       <button class="nav-card" onclick="goto('reports')"><i class="ti ti-file-report"></i><div class="t">檢查報告</div><div class="s">上傳 EMG／影像／報告</div></button>
@@ -577,6 +683,7 @@ async function homeHTML(){
       <button class="nav-card" onclick="goto('ai')"><i class="ti ti-sparkles"></i><div class="t">AI 摘要</div><div class="s">趨勢整理／回診簡報</div></button>
       <button class="nav-card" onclick="goto('caseSummary')"><i class="ti ti-notes"></i><div class="t">病例簡述</div><div class="s">持續記錄病史與近況</div></button>
     </div>
+    ${externalAppsHTML()}
     <details class="home-readme">
       <summary>📖 使用說明（README）<i class="ti ti-chevron-down" style="margin-left:auto;"></i></summary>
       <div class="hr-body">
@@ -586,13 +693,18 @@ async function homeHTML(){
         ② 走路前先做「<b>足部暖身</b>」約 4 分鐘<br>
         ③ 每天完成「<b>垂足背屈復健</b>」5 動作＋「<b>臀部啟動訓練</b>」3 動作<br>
         ④ 空檔隨時做「<b>腳掌抬起</b>」加強腳背力量<br>
-        ⑤ 睡前記錄「<b>症狀日誌</b>」與「<b>功能與步態</b>」</p>
+        ⑤ 需要腰椎／胸背／步態訓練時，到「<b>更多復健工具</b>」開啟姊妹 App，做完回來點「快速記錄」<br>
+        ⑥ 睡前記錄「<b>症狀日誌</b>」與「<b>功能與步態</b>」</p>
+        <p><b>🧩 跨 App 復健系統整合</b><br>
+        本 App 內建 4 個垂足復健模組；腰椎保養、胸背訓練、步態訓練則在姊妹 App（5-steps-rehab-for-footdrop／gait／rehab）進行，這幾個 App 本身不會互相同步資料。
+        首頁與運動分頁都有「🧰 更多復健工具」可直接開啟這些 App；做完訓練後回來點對應的「✓ 快速記錄」按鈕，才會一起計入本 App 的統計。<br>
+        首頁的「<b>復健系統分析</b>」卡片會自動統計本週各類別運動次數，並比對症狀日誌的肌力趨勢；「AI 摘要」裡的「🧩 復健系統整合分析」則會請 AI 進一步整理各類訓練是否均衡、與症狀變化有沒有觀察得到的關聯（僅描述觀察，不做醫療判斷）。</p>
         <p><b>🗂 功能總覽</b><br>
         ・<b>病歷</b>：手術／回診／EMG 時間軸，可附檢查報告<br>
         ・<b>症狀</b>：肌力、麻木、足底筋膜每日記錄<br>
-        ・<b>運動</b>：四個復健模組，語音引導＋自動計時<br>
+        ・<b>運動</b>：四個內建復健模組（語音引導＋自動計時）＋姊妹 App 連結與快速記錄<br>
         ・<b>週課表</b>：全週保養時間表，✏️ 可自訂時間、區間倒數<br>
-        ・<b>AI 摘要</b>：趨勢整理／回診簡報（需在設定輸入 API Key）<br>
+        ・<b>AI 摘要</b>：趨勢整理／回診簡報／復健系統整合分析（需在設定輸入 API Key）<br>
         ・<b>設定</b>：密碼、雲端同步、資料備份匯出／匯入</p>
         <p><b>🔒 資料與隱私</b><br>資料存在您裝置的瀏覽器中（IndexedDB），不會上傳，除非您自行啟用 Firebase 雲端同步。請定期到「設定」匯出 JSON 備份，避免清除瀏覽器資料時遺失。</p>
         <p><b>⚠️ 免責聲明</b><br>本系統僅協助整理紀錄與衛教資訊，不構成醫療診斷；動作請以您的醫師與物理治療師指導為準，如症狀急遽惡化請立即就醫。</p>
@@ -1179,7 +1291,9 @@ function exerciseHomeHTML(){
     <div class="mode-card" onclick="startWarmModule()"><i class="ti ti-sun"></i><div style="font-weight:600;font-size:16px;">足部暖身</div><div style="font-size:12px;color:var(--text3);margin-top:4px;">走路前的準備運動，約 4 分鐘</div></div>
     <div class="mode-card" onclick="startRehabModule()"><i class="ti ti-heart-rate-monitor"></i><div style="font-weight:600;font-size:16px;">垂足背屈復健</div><div style="font-size:12px;color:var(--text3);margin-top:4px;">每日復健運動，5 個動作</div></div>
     <div class="mode-card" onclick="startGluteModule()" style="border-color:rgba(61,122,79,.45);"><i class="ti ti-activity" style="color:#3d7a4f;"></i><div style="font-weight:600;font-size:16px;">臀部啟動訓練</div><div style="font-size:12px;color:var(--text3);margin-top:4px;">代償修正 3 動作，約 5 分鐘</div></div>
-    <div class="mode-card" onclick="startLiftModule()" style="border-color:rgba(176,82,45,.45);"><i class="ti ti-arrow-big-up" style="color:#b0522d;"></i><div style="font-weight:600;font-size:16px;">腳掌抬起</div><div style="font-size:12px;color:var(--text3);margin-top:4px;">單一動作，約 1 分鐘</div></div>    <p style="text-align:center;font-size:11px;color:var(--text3);margin-top:1rem;line-height:1.8;">
+    <div class="mode-card" onclick="startLiftModule()" style="border-color:rgba(176,82,45,.45);"><i class="ti ti-arrow-big-up" style="color:#b0522d;"></i><div style="font-weight:600;font-size:16px;">腳掌抬起</div><div style="font-size:12px;color:var(--text3);margin-top:4px;">單一動作，約 1 分鐘</div></div>
+    ${externalAppsHTML()}
+    <p style="text-align:center;font-size:11px;color:var(--text3);margin-top:1rem;line-height:1.8;">
       動作示意為圖示簡化版；正式動作請以您的物理治療師指導為準。
     </p>
   `;
@@ -1801,6 +1915,7 @@ async function aiHTML(){
           <button class="btn" onclick="runTrendSummary()">📈 產生趨勢整理</button>
           <button class="btn secondary" onclick="runVisitBrief()">📋 產生回診摘要</button>
           <button class="btn secondary" onclick="runGaitCoaching()">🦶 步態與姿勢衛教建議</button>
+          <button class="btn secondary" onclick="runRehabSystemAnalysis()">🧩 復健系統整合分析</button>
           <button class="btn secondary" onclick="runReportPicker()">🔬 檢查報告解析</button>
         </div>
         <div id="aiOutput"></div>
@@ -1818,10 +1933,19 @@ async function buildContextText(){
   const tlText = timeline.map(t => `- ${t.date}［${TL_TYPES[t.type]?.label||t.type}］${t.title}${t.hospital?'（'+t.hospital+'）':''}：${t.desc||''}${t.historyDesc? '｜病史描述：'+t.historyDesc : ''}${t.doctorConclusion? '｜醫師結論：'+t.doctorConclusion : ''}`).join('\n');
   const symText = symptomLogs.slice(-30).map(l => `- ${l.date}${l.time?' '+l.time:''} 背屈肌力${l.dorsiStrength}/5，麻木「${l.numbnessArea||'無'}」嚴重度${l.numbnessSeverity}/10，足底筋膜：${(l.plantarFascia&&l.plantarFascia.length)?l.plantarFascia.map(k=>(FASCIA_ZONES.find(z=>z.k===k)||{}).l||k).join('、'):'無'}${l.note?'，備註：'+l.note:''}`).join('\n');
   const gaitText = gaitLogs.slice(-30).map(l => `- ${l.date}${l.usedAFO?'（有使用AFO／護具）':''}：${l.note||''}`).join('\n');
-  const exText = `近期復健運動完成次數：${exLogs.length} 次`;
+  const byModule = {};
+  for (const l of exLogs){
+    const key = l.module || 'other';
+    byModule[key] = (byModule[key]||0) + 1;
+  }
+  const byModuleText = Object.entries(byModule)
+    .map(([k,n]) => `${(MODULE_META[k]||{label:k}).label}：${n} 次`).join('、');
+  const analysis = await computeRehabAnalysis();
+  const catText = Object.entries(analysis.thisWeekByCat).map(([c,n]) => `${c} ${n}次`).join('、') || '無';
+  const exText = `總完成次數：${exLogs.length} 次（各模組：${byModuleText||'無'}）\n本週完成 ${analysis.thisWeekCount} 次，上週 ${analysis.lastWeekCount} 次；本週各類別：${catText}\n備註：其中「腰椎保養」「胸背訓練」「步態訓練」類別是使用者在姊妹 App（5-steps-rehab-for-footdrop／gait／rehab）完成後手動回報的紀錄，非本 App 直接量測。`;
   const csText = caseNotes.map(n => `- ${n.date}：${n.text}`).join('\n');
 
-  return `【病例簡述／病史背景】\n${csText||'（無資料）'}\n\n【病歷時間軸】\n${tlText||'（無資料）'}\n\n【症狀日誌】\n${symText||'（無資料）'}\n\n【步態與功能】\n${gaitText||'（無資料）'}\n\n【運動紀錄】\n${exText}`;
+  return `【病例簡述／病史背景】\n${csText||'（無資料）'}\n\n【病歷時間軸】\n${tlText||'（無資料）'}\n\n【症狀日誌】\n${symText||'（無資料）'}\n\n【步態與功能】\n${gaitText||'（無資料）'}\n\n【運動紀錄與跨 App 整合分析】\n${exText}`;
 }
 async function callGeminiAuto(prompt){
   const key = settings.geminiKey;
@@ -1884,6 +2008,18 @@ async function runVisitBrief(){
   try{
     const ctx = await buildContextText();
     const prompt = `${AI_SAFETY_INSTRUCTION}\n\n以下是使用者的完整紀錄：\n${ctx}\n\n請生成一份可以直接帶去回診、讓醫師快速閱讀的摘要，包含：1) 病史重點（簡短一段） 2) 上次回診至今症狀與功能的變化 3) 建議這次與醫師討論的問題清單（條列）。約 300-400 字，繁體中文。`;
+    const text = await callAI(prompt);
+    out.innerHTML = `<p class="ai-response">${escapeHtml(text)}</p>`;
+  }catch(e){
+    out.innerHTML = `<p class="ai-response" style="color:var(--red);">產生失敗：${escapeHtml(e.message||String(e))}</p>`;
+  }
+}
+async function runRehabSystemAnalysis(){
+  const out = document.getElementById('aiOutput');
+  out.innerHTML = '<p class="ai-thinking">正在整合各項運動紀錄與症狀資料，請稍候…</p>';
+  try{
+    const ctx = await buildContextText();
+    const prompt = `${AI_SAFETY_INSTRUCTION}\n\n以下是使用者的完整紀錄，其中運動紀錄整合了本 App 內建的垂足復健模組，以及使用者在姊妹 App（腰椎保養、胸背訓練、步態訓練）完成後手動回報的紀錄：\n${ctx}\n\n請將「運動執行狀況」與「症狀／步態變化」放在一起看，整理出一份跨面向的復健系統分析，包含：\n1) 各類別運動（垂足復健／腰椎保養／胸背訓練／步態訓練）的執行頻率是否均衡，有沒有哪一類明顯被忽略\n2) 運動執行狀況與症狀日誌趨勢之間，有沒有觀察得到的關聯（例如某類運動執行較多的期間，肌力自評或步態紀錄是否有變化）——只描述觀察到的關聯，不做因果或醫療判斷\n3) 給使用者 2-3 點具體、可執行的紀錄或訓練安排建議（例如提醒補齊某一類別的訓練），不涉及治療方向調整\n約 350-450 字，繁體中文，條列清楚。`;
     const text = await callAI(prompt);
     out.innerHTML = `<p class="ai-response">${escapeHtml(text)}</p>`;
   }catch(e){
